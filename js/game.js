@@ -1,6 +1,6 @@
 /*
  * Warrior Legends — game logic on top of the shared arcade shell (js/arcade-shell.js).
- * Plain script, no modules: reads window.Arcade.
+ * Plain script, no modules: reads window.Arcade and the global ROOMS from js/rooms.js.
  */
 (function () {
   'use strict';
@@ -21,22 +21,7 @@
   };
   var CODES = Object.keys(KEYMAP);
   var DIR_ORDER = ['up', 'down', 'left', 'right'];
-
-  // The original room, in the character format used from Step 2 on.
-  var ROOM = [
-    '################',
-    '#.....#...D.####',
-    '#.K.K.#.S.#.#KK#',
-    '#.....#...#D#D##',
-    '###D###.K.#...##',
-    '#.........#.K.##',
-    '#.........#...##',
-    '#.#########.K.##',
-    '#.#.#.#...#...##',
-    '#.D.D.D.T.######',
-    '#.#.#.#...######',
-    '################'
-  ];
+  var NROOMS = ROOMS.length;
 
   // ------------------------------------------------------------ images
   var IMG_FILES = {
@@ -54,12 +39,36 @@
     }));
   }
 
+  // ------------------------------------------------------------ progress (localStorage via Arcade.store)
+  // arcade.warrior.progress = { unlocked, bests: { [room]: { ms, moves } }, deadlineBests: { [room]: ms } }
+  // arcade.warrior.best     = rooms cleared (0–8)
+  function loadProgress() {
+    var p = A.store.get('progress', null);
+    if (!p || typeof p !== 'object') p = {};
+    var unlocked = Math.max(1, Math.min(NROOMS, p.unlocked | 0));
+    return {
+      unlocked: unlocked,
+      bests: p.bests && typeof p.bests === 'object' ? p.bests : {},
+      deadlineBests: p.deadlineBests && typeof p.deadlineBests === 'object' ? p.deadlineBests : {}
+    };
+  }
+  var progress = null;   // loaded after Arcade.init, which sets the storage namespace
+
+  function roomsCleared() {
+    var n = 0;
+    for (var i = 1; i <= NROOMS; i++) if (progress.bests[i] || progress.deadlineBests[i]) n++;
+    return n;
+  }
+
   // ------------------------------------------------------------ state
+  var roomIx = 0;         // 0-based index into ROOMS
   var st = null;          // everything about the current attempt
   var lastDir = null;     // most recent direction pressed (for hold priority)
+  var run = {};           // this session's chain of clears: { [room]: { ms, moves } }
 
   function newAttempt() {
-    var grid = ROOM.map(function (row) { return row.split(''); });
+    var src = ROOMS[roomIx].grid;
+    var grid = src.map(function (row) { return row.split(''); });
     var sc = 0, sr = 0;
     for (var r = 0; r < ROWS; r++) for (var c = 0; c < COLS; c++) {
       if (grid[r][c] === 'S') { sc = c; sr = r; grid[r][c] = '.'; }
@@ -68,21 +77,34 @@
       grid: grid,
       p: { c: sc, r: sr, fc: sc, fr: sr, t: 1, moving: false, facing: 'down' },
       keys: 0, moves: 0,
+      started: false, ms: 0,
       buffer: null, bumpDir: null,
       unlocking: [],      // [{c, r, t}]
       done: false
     };
+    lastDir = null;
+    updateHud();
   }
 
-  function restartRoom() {
-    newAttempt();
+  function startRoom(ix) {
+    roomIx = Math.max(0, Math.min(NROOMS - 1, ix));
     A.ui.hideOverlay();
+    A.fx.clear();
+    newAttempt();
   }
+
+  function restartRoom() { startRoom(roomIx); }
 
   // ------------------------------------------------------------ rules
   function tileAt(c, r) {
     if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return '#';
     return st.grid[r][c];
+  }
+
+  function doorsLeft() {
+    var n = 0;
+    for (var r = 0; r < ROWS; r++) for (var c = 0; c < COLS; c++) if (st.grid[r][c] === 'D') n++;
+    return n;
   }
 
   // Can the warrior step onto (c, r) right now?
@@ -106,6 +128,7 @@
       return false;
     }
     st.bumpDir = null;
+    st.started = true;                  // the timer starts on the first move
     if (tileAt(nc, nr) === 'D') {
       st.keys--;
       st.grid[nr][nc] = 'd';            // unlocking: drawn as a brightening door, walkable
@@ -132,15 +155,143 @@
     }
   }
 
+  // ------------------------------------------------------------ completion
   function roomComplete() {
     st.done = true;
+    var n = roomIx + 1, ms = Math.round(st.ms), moves = st.moves;
     A.sfx.play('win');
     A.fx.flash('rgba(239,208,150,0.45)', 220);
+
+    // Save bests and unlock the next room.
+    var prev = progress.bests[n];
+    var newTime = !prev || ms < prev.ms;
+    progress.bests[n] = {
+      ms: prev ? Math.min(prev.ms, ms) : ms,
+      moves: prev ? Math.min(prev.moves, moves) : moves
+    };
+    progress.unlocked = Math.max(progress.unlocked, Math.min(NROOMS, n + 1));
+    A.store.set('progress', progress);
+    A.store.best('best', roomsCleared());
+
+    run[n] = { ms: ms, moves: moves };
+    updateHud();
+
+    if (n === NROOMS) { dungeonCleared(); return; }
+
+    var best = progress.bests[n];
     A.ui.overlay({
-      kicker: 'Room cleared',
-      title: st.moves + ' moves',
-      hint: 'Space to play again',
-      action: restartRoom
+      kicker: 'Room ' + n + ' cleared',
+      title: A.fmt.time(ms, 1),
+      lines: [
+        'Moves ' + moves + ' (par ' + ROOMS[roomIx].par + ')',
+        newTime && prev ? 'New best!' : 'Best ' + A.fmt.time(best.ms, 1)
+      ],
+      buttons: [
+        { label: 'Next room', onClick: function () { startRoom(roomIx + 1); } },
+        { label: 'Retry', onClick: restartRoom },
+        { label: 'Copy', keepOpen: true, onClick: function () { A.share.copy(roomShare(n, ms, moves)); } },
+        { label: 'Rooms', onClick: showStart }
+      ],
+      hint: 'Space for the next room · R to retry',
+      action: function () { startRoom(roomIx + 1); }
+    });
+  }
+
+  function runTotals() {
+    var t = { ms: 0, moves: 0, rooms: 0 };
+    Object.keys(run).forEach(function (k) { t.ms += run[k].ms; t.moves += run[k].moves; t.rooms++; });
+    return t;
+  }
+
+  function dungeonCleared() {
+    var t = runTotals(), last = run[NROOMS];
+    A.ui.overlay({
+      kicker: 'Room ' + NROOMS + ' cleared · ' + A.fmt.time(last.ms, 1) + ' · ' + last.moves + ' moves',
+      title: 'Dungeon cleared',
+      lines: [
+        'Total time ' + clock(t.ms),
+        'Total moves ' + t.moves,
+        t.rooms < NROOMS ? 'This run: ' + t.rooms + '/' + NROOMS + ' rooms — start at room 1 for a full run' : 'All ' + NROOMS + ' rooms in one run'
+      ],
+      buttons: [
+        { label: 'Copy', keepOpen: true, onClick: function () { A.share.copy(runShare()); } },
+        { label: 'Retry room ' + NROOMS, onClick: restartRoom },
+        { label: 'Rooms', onClick: showStart }
+      ],
+      hint: 'Space for the room list',
+      action: showStart
+    });
+  }
+
+  // m:ss.t for run totals (3:12.6); plain seconds under a minute.
+  function clock(ms) {
+    if (ms < 60000) return A.fmt.time(ms, 1);
+    var tenths = Math.floor(ms / 100), m = Math.floor(tenths / 600), s = (tenths % 600) / 10;
+    return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
+  }
+
+  function roomShare(n, ms, moves) {
+    return '🗝️ Warrior Legends · Room ' + n + ' · ' + A.fmt.time(ms, 1) + ' · ' + moves + ' moves (par ' + ROOMS[n - 1].par + ')';
+  }
+  function runShare() {
+    var t = runTotals();
+    return '🗝️ Warrior Legends · ' + t.rooms + '/' + NROOMS + ' rooms · ' + clock(t.ms) + ' · ' + t.moves + ' moves';
+  }
+
+  // ------------------------------------------------------------ start overlay / room select
+  function showStart() {
+    var target = Math.min(progress.unlocked, NROOMS) - 1;
+    var buttons = [];
+    for (var i = 0; i < NROOMS; i++) {
+      (function (ix) {
+        var locked = ix + 1 > progress.unlocked;
+        buttons.push({
+          label: String(ix + 1),
+          locked: locked,
+          onClick: function () { if (!locked) { run = {}; startRoom(ix); } }
+        });
+      })(i);
+    }
+    roomIx = target;
+    newAttempt();
+    st.done = true; // nothing moves behind the start overlay
+    A.ui.overlay({
+      kicker: 'Rooms cleared ' + roomsCleared() + '/' + NROOMS,
+      title: 'Warrior Legends',
+      lines: ['Grab the keys. Every door costs one. Not every door is worth it.'],
+      buttons: buttons,
+      hint: 'Space to play room ' + (target + 1),
+      action: function () { run = {}; startRoom(target); }
+    });
+    decorateRoomButtons(buttons);
+  }
+
+  // The shell's overlay has no notion of disabled buttons; grey out locked rooms after it renders.
+  function decorateRoomButtons(buttons) {
+    var els = document.querySelectorAll('.arcade-overlay .arcade-btn');
+    Array.prototype.forEach.call(els, function (btn, i) {
+      var b = buttons[i];
+      if (!b) return;
+      btn.classList.add('wl-room');
+      if (b.locked) { btn.disabled = true; btn.title = 'Locked'; btn.setAttribute('aria-label', 'Room ' + b.label + ' (locked)'); }
+      else {
+        var best = progress.bests[i + 1];
+        btn.title = ROOMS[i].name + (best ? ' · best ' + A.fmt.time(best.ms, 1) + ' · ' + best.moves + ' moves' : '');
+        if (best) btn.classList.add('wl-cleared');
+      }
+    });
+  }
+
+  // ------------------------------------------------------------ HUD
+  function updateHud() {
+    if (!st) return;
+    var room = ROOMS[roomIx];
+    A.ui.hud({
+      Room: (roomIx + 1) + '/' + NROOMS + ' · ' + room.name,
+      Keys: st.keys,
+      'Doors left': doorsLeft(),
+      Moves: st.moves + ' (par ' + room.par + ')',
+      Time: A.fmt.time(st.ms, 1)
     });
   }
 
@@ -192,8 +343,13 @@
     }
 
     if (st.done) return;
+    if (st.started) st.ms += ms;
     readPresses();
+    step(ms);
+    updateHud();
+  }
 
+  function step(ms) {
     var p = st.p;
     if (p.moving) {
       p.t += ms / STEP_MS;
@@ -249,6 +405,7 @@
 
   // ------------------------------------------------------------ boot
   A.init({ game: 'warrior', title: 'Warrior Legends', onRestart: restartRoom });
+  progress = loadProgress();
   A.input.capture(CODES);
   A.input.onPointerDown(onPointerDown);
   A.touch.dpad({ up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' });
@@ -256,6 +413,7 @@
   newAttempt();
   loadImages().then(function () {
     A.loop(update, draw);
+    showStart();
   }, function (err) {
     A.ui.overlay({ title: 'Could not load images', lines: [String(err && err.message || err)] });
   });
@@ -263,7 +421,11 @@
   // Read-only snapshot for debugging from the console.
   window.WarriorLegends = {
     debug: function () {
-      return st && { c: st.p.c, r: st.p.r, moving: st.p.moving, facing: st.p.facing, keys: st.keys, moves: st.moves, done: st.done };
+      return st && {
+        room: roomIx + 1, c: st.p.c, r: st.p.r, moving: st.p.moving, facing: st.p.facing,
+        keys: st.keys, moves: st.moves, ms: Math.round(st.ms), started: st.started, done: st.done,
+        doorsLeft: doorsLeft()
+      };
     }
   };
 })();

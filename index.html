@@ -6,11 +6,19 @@
   <title>Warrior Legends</title>
   <meta name="description" content="Warrior Legends: lock-and-key dungeon rooms where every door costs a key and not every door is worth it.">
   <link rel="icon" href="data:,">
+  <style>
+    /* Game-specific bits; the shared shell CSS below stays untouched. */
+    .arcade-btn.wl-room { min-width: 44px; font-family: "Pixelify Sans", "Silkscreen", "Courier New", monospace; }
+    .arcade-btn.wl-room.wl-cleared { border-color: #e2bb6e; color: #efd096; }
+    .arcade-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .arcade-btn:disabled:hover { background: #163a42; border-color: #2a5a63; }
+  </style>
   <link rel="stylesheet" href="css/arcade-shell.css">
 </head>
 <body>
   <canvas id="gameCanvas" width="800" height="600" aria-label="Warrior Legends game"></canvas>
   <script src="js/arcade-shell.js"></script>
+  <script src="js/rooms.js"></script>
   <script src="js/game.js"></script>
 </body>
 </html>
