@@ -316,7 +316,10 @@
     A.ui.overlay({
       kicker: 'Rooms cleared ' + roomsCleared() + '/' + NROOMS,
       title: 'Warrior Legends',
-      lines: ['Grab the keys. Every door costs one. Not every door is worth it.'],
+      lines: [
+        'Grab the keys. Every door costs one. Not every door is worth it.',
+        '<span class="wl-controls">Arrows / WASD / d-pad · R restarts · P pauses</span>'
+      ],
       buttons: buttons,
       hint: 'Space to play room ' + (target + 1),
       action: function () { run = {}; startRoom(target); }
