@@ -28,6 +28,7 @@
   var TORCH_DARK = 4;           // tiles: torchlight gone at this radius
   var SEEN_R = 3.75;            // tiles: anything this close (centre to centre) is remembered
   var REMEMBERED_DARK = 0.65;   // seen-but-far tiles drawn at 35% brightness
+  var DEADLINE_MS = 30000;      // Deadline mode: time per room
   var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   // ------------------------------------------------------------ images
@@ -74,6 +75,7 @@
   var run = {};           // this session's chain of clears: { [room]: { ms, moves } }
   var seenByRoom = {};    // remembered tiles per room for this session (kept across retries)
   var clockMs = 0;        // animation clock
+  var deadline = false;   // Deadline mode (toggled on the start overlay; not persisted)
   var darkCv = null, darkCtx = null;
 
   function newAttempt() {
@@ -87,7 +89,7 @@
       grid: grid,
       p: { c: sc, r: sr, fc: sc, fr: sr, t: 1, moving: false, facing: 'down' },
       keys: 0, moves: 0,
-      started: false, ms: 0,
+      started: false, ms: 0, lastSec: Math.ceil(DEADLINE_MS / 1000),
       buffer: null, bumpDir: null,
       unlocking: [],      // [{c, r, t}]
       stepCount: 0,       // walk-cycle parity and quiet footstep ticks
@@ -189,29 +191,39 @@
     A.sfx.play('win');
     A.fx.flash('rgba(239,208,150,0.45)', 220);
 
-    // Save bests and unlock the next room.
-    var prev = progress.bests[n];
-    var newTime = !prev || ms < prev.ms;
-    progress.bests[n] = {
-      ms: prev ? Math.min(prev.ms, ms) : ms,
-      moves: prev ? Math.min(prev.moves, moves) : moves
-    };
+    // Save bests (Deadline runs keep their own) and unlock the next room.
+    var prevMs, bestMs;
+    if (deadline) {
+      prevMs = progress.deadlineBests[n];
+      progress.deadlineBests[n] = prevMs == null ? ms : Math.min(prevMs, ms);
+      bestMs = progress.deadlineBests[n];
+    } else {
+      var prev = progress.bests[n];
+      prevMs = prev ? prev.ms : null;
+      progress.bests[n] = {
+        ms: prev ? Math.min(prev.ms, ms) : ms,
+        moves: prev ? Math.min(prev.moves, moves) : moves
+      };
+      bestMs = progress.bests[n].ms;
+    }
+    var newBest = prevMs != null && ms < prevMs;
     progress.unlocked = Math.max(progress.unlocked, Math.min(NROOMS, n + 1));
     A.store.set('progress', progress);
     A.store.best('best', roomsCleared());
+    A.store.bumpPlays();
 
     run[n] = { ms: ms, moves: moves };
     updateHud();
 
     if (n === NROOMS) { dungeonCleared(); return; }
 
-    var best = progress.bests[n];
     A.ui.overlay({
-      kicker: 'Room ' + n + ' cleared',
+      kicker: 'Room ' + n + ' cleared' + (deadline ? ' · Deadline' : ''),
       title: A.fmt.time(ms, 1),
       lines: [
         'Moves ' + moves + ' (par ' + ROOMS[roomIx].par + ')',
-        newTime && prev ? 'New best!' : 'Best ' + A.fmt.time(best.ms, 1)
+        parLine(moves, ROOMS[roomIx].par),
+        newBest ? '<span style="color:' + TH.brassHi + '">New best!</span>' : 'Best ' + A.fmt.time(bestMs, 1) + (deadline ? ' (Deadline)' : '')
       ],
       buttons: [
         { label: 'Next room', onClick: function () { startRoom(roomIx + 1); } },
@@ -224,6 +236,19 @@
     });
   }
 
+  function parLine(moves, par) {
+    if (moves <= par) return '<span style="color:' + TH.brass + '">Par!</span>';
+    return '+' + (moves - par) + ' over par';
+  }
+
+  // Deadline: the clock ran out. Restart the room.
+  function outOfTime() {
+    A.sfx.play('lose');
+    A.fx.flash('rgba(255,122,89,0.45)', 260);
+    A.ui.toast('Out of time');
+    newAttempt();
+  }
+
   function runTotals() {
     var t = { ms: 0, moves: 0, rooms: 0 };
     Object.keys(run).forEach(function (k) { t.ms += run[k].ms; t.moves += run[k].moves; t.rooms++; });
@@ -233,7 +258,7 @@
   function dungeonCleared() {
     var t = runTotals(), last = run[NROOMS];
     A.ui.overlay({
-      kicker: 'Room ' + NROOMS + ' cleared · ' + A.fmt.time(last.ms, 1) + ' · ' + last.moves + ' moves',
+      kicker: 'Room ' + NROOMS + ' cleared · ' + A.fmt.time(last.ms, 1) + ' · ' + last.moves + ' moves' + (deadline ? ' · Deadline' : ''),
       title: 'Dungeon cleared',
       lines: [
         'Total time ' + clock(t.ms),
@@ -279,6 +304,12 @@
         });
       })(i);
     }
+    buttons.push({
+      label: 'Deadline: ' + (deadline ? 'on · 30 s' : 'off'),
+      toggle: true,
+      keepOpen: true,
+      onClick: function () { deadline = !deadline; showStart(); }
+    });
     roomIx = target;
     newAttempt();
     st.done = true; // nothing moves behind the start overlay
@@ -299,12 +330,20 @@
     Array.prototype.forEach.call(els, function (btn, i) {
       var b = buttons[i];
       if (!b) return;
+      if (b.toggle) {
+        btn.classList.add('wl-toggle');
+        btn.setAttribute('aria-pressed', deadline ? 'true' : 'false');
+        btn.title = 'Deadline mode: 30 seconds per room; the room restarts when time runs out';
+        return;
+      }
       btn.classList.add('wl-room');
       if (b.locked) { btn.disabled = true; btn.title = 'Locked'; btn.setAttribute('aria-label', 'Room ' + b.label + ' (locked)'); }
       else {
-        var best = progress.bests[i + 1];
-        btn.title = ROOMS[i].name + (best ? ' · best ' + A.fmt.time(best.ms, 1) + ' · ' + best.moves + ' moves' : '');
-        if (best) btn.classList.add('wl-cleared');
+        var best = progress.bests[i + 1], dl = progress.deadlineBests[i + 1];
+        btn.title = ROOMS[i].name +
+          (best ? ' · best ' + A.fmt.time(best.ms, 1) + ' · ' + best.moves + ' moves' : '') +
+          (dl != null ? ' · Deadline best ' + A.fmt.time(dl, 1) : '');
+        if (best || dl != null) btn.classList.add('wl-cleared');
       }
     });
   }
@@ -318,8 +357,14 @@
       Keys: st.keys,
       'Doors left': doorsLeft(),
       Moves: st.moves + ' (par ' + room.par + ')',
-      Time: A.fmt.time(st.ms, 1)
+      Time: timeText()
     });
+  }
+
+  function timeText() {
+    if (!deadline) return A.fmt.time(st.ms, 1);
+    var left = Math.max(0, DEADLINE_MS - st.ms), txt = A.fmt.time(left, 1);
+    return left < 10000 ? '<span style="color:' + TH.coral + '">' + txt + '</span>' : txt;
   }
 
   // ------------------------------------------------------------ input
@@ -372,6 +417,14 @@
 
     if (st.done) return;
     if (st.started) st.ms += ms;
+    if (deadline && st.started) {
+      var left = DEADLINE_MS - st.ms, sec = Math.ceil(left / 1000);
+      if (left <= 0) { outOfTime(); return; }
+      if (sec < st.lastSec) {
+        st.lastSec = sec;
+        if (sec < 10) A.sfx.play('countdown', sec === 1);
+      }
+    }
     readPresses();
     step(ms);
     updateHud();
@@ -500,7 +553,7 @@
       return st && {
         room: roomIx + 1, c: st.p.c, r: st.p.r, moving: st.p.moving, facing: st.p.facing,
         keys: st.keys, moves: st.moves, ms: Math.round(st.ms), started: st.started, done: st.done,
-        doorsLeft: doorsLeft(), seen: st.seen.filter(Boolean).length, reducedMotion: reducedMotion
+        deadline: deadline, doorsLeft: doorsLeft(), seen: st.seen.filter(Boolean).length, reducedMotion: reducedMotion
       };
     }
   };
