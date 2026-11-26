@@ -15,6 +15,20 @@
     .wl-controls { font-size: 15px; color: #b3c8c0; }
     .arcade-btn:disabled { opacity: 0.35; cursor: not-allowed; }
     .arcade-btn:disabled:hover { background: #163a42; border-color: #2a5a63; }
+    /* Phones: the canvas is only ~260 px tall, so compact the overlays to fit inside it. */
+    @media (max-width: 600px) {
+      .arcade-body .arcade-overlay { align-items: safe center; overflow-y: auto; }
+      .arcade-body .arcade-overlay-box { padding: 6px 8px; max-width: 100%; }
+      .arcade-body .arcade-kicker { font-size: 11px; margin-bottom: 2px; }
+      .arcade-body .arcade-overlay-title { font-size: 24px; margin-bottom: 4px; }
+      .arcade-body .arcade-overlay-line { font-size: 13px; margin: 2px 0; }
+      .arcade-body .arcade-overlay-buttons { gap: 5px; margin-top: 6px; }
+      .arcade-body .arcade-btn { padding: 4px 10px; font-size: 13px; }
+      .arcade-body .arcade-btn.wl-room { min-width: 30px; padding: 4px 6px; }
+      .arcade-body .arcade-btn.wl-toggle { margin-left: 0; }
+      .arcade-body .arcade-overlay-hint { margin-top: 6px; font-size: 13px; }
+      .wl-controls { display: none; }
+    }
   </style>
   <link rel="stylesheet" href="css/arcade-shell.css">
 </head>
