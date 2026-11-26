@@ -22,11 +22,18 @@
   var CODES = Object.keys(KEYMAP);
   var DIR_ORDER = ['up', 'down', 'left', 'right'];
   var NROOMS = ROOMS.length;
+  var HERO_PX = 32;             // 16×16 sprite drawn at 2× inside a 50 px tile
+  var BREATHE_MS = 600;         // idle breathe frame period
+  var TORCH_CLEAR = 2.5;        // tiles: fully lit inside this radius
+  var TORCH_DARK = 4;           // tiles: torchlight gone at this radius
+  var SEEN_R = 3.75;            // tiles: anything this close (centre to centre) is remembered
+  var REMEMBERED_DARK = 0.65;   // seen-but-far tiles drawn at 35% brightness
+  var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   // ------------------------------------------------------------ images
   var IMG_FILES = {
     '.': 'world_ground.png', '#': 'world_wall.png', T: 'world_goal.png',
-    K: 'world_key.png', D: 'world_door.png', hero: 'warrior.png'
+    K: 'world_key.png', D: 'world_door.png'
   };
   var img = {};
 
@@ -65,6 +72,9 @@
   var st = null;          // everything about the current attempt
   var lastDir = null;     // most recent direction pressed (for hold priority)
   var run = {};           // this session's chain of clears: { [room]: { ms, moves } }
+  var seenByRoom = {};    // remembered tiles per room for this session (kept across retries)
+  var clockMs = 0;        // animation clock
+  var darkCv = null, darkCtx = null;
 
   function newAttempt() {
     var src = ROOMS[roomIx].grid;
@@ -80,9 +90,12 @@
       started: false, ms: 0,
       buffer: null, bumpDir: null,
       unlocking: [],      // [{c, r, t}]
+      stepCount: 0,       // walk-cycle parity and quiet footstep ticks
+      seen: seenByRoom[roomIx] || (seenByRoom[roomIx] = new Array(ROWS * COLS)),
       done: false
     };
     lastDir = null;
+    markSeen();
     updateHud();
   }
 
@@ -99,6 +112,16 @@
   function tileAt(c, r) {
     if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return '#';
     return st.grid[r][c];
+  }
+
+  // Remember every tile near the warrior's current (destination) tile.
+  function markSeen() {
+    var p = st.p, R = Math.ceil(SEEN_R);
+    for (var r = p.r - R; r <= p.r + R; r++) for (var c = p.c - R; c <= p.c + R; c++) {
+      if (r < 0 || c < 0 || r >= ROWS || c >= COLS) continue;
+      var dc = c - p.c, dr = r - p.r;
+      if (dc * dc + dr * dr <= SEEN_R * SEEN_R) st.seen[r * COLS + c] = true;
+    }
   }
 
   function doorsLeft() {
@@ -124,6 +147,7 @@
       if (fresh || st.bumpDir !== dir) {
         st.bumpDir = dir;
         A.sfx.play('bounce');
+        if (!reducedMotion) A.fx.shake(2, 90);
       }
       return false;
     }
@@ -136,6 +160,9 @@
       A.sfx.play('unlock');
     }
     p.fc = p.c; p.fr = p.r; p.c = nc; p.r = nr; p.t = 0; p.moving = true;
+    st.stepCount++;
+    if (st.stepCount % 2 === 0) A.sfx.tone({ freq: 880, dur: 0.03, type: 'square', vol: 0.05 }); // quiet tick
+    markSeen();
     return true;
   }
 
@@ -332,6 +359,7 @@
   function update(dt) {
     if (!st || A.ui.overlayVisible()) return;
     var ms = dt * 1000;
+    clockMs += ms;
 
     for (var i = st.unlocking.length - 1; i >= 0; i--) {
       var u = st.unlocking[i];
@@ -394,13 +422,61 @@
     };
   }
 
+  function heroFrame() {
+    var p = st.p, f = SPRITES.frames[p.facing] || SPRITES.frames.down;
+    if (p.moving) return f[st.stepCount % 2];
+    if (reducedMotion) return f[0];
+    return f[Math.floor(clockMs / BREATHE_MS) % 2 === 0 ? 0 : 2];
+  }
+
+  function drawHero(ctx, hp) {
+    var off = (TILE - HERO_PX) / 2;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(heroFrame(), Math.round(hp.x + off), Math.round(hp.y + off), HERO_PX, HERO_PX);
+    ctx.restore();
+  }
+
+  // Fog of war: unseen tiles black, remembered tiles dim, a torch gradient around the warrior.
+  function drawTorch(ctx, hp) {
+    var W = COLS * TILE, H = ROWS * TILE;
+    if (!darkCv) { darkCv = document.createElement('canvas'); darkCv.width = W; darkCv.height = H; darkCtx = darkCv.getContext('2d'); }
+    var d = darkCtx;
+    d.globalCompositeOperation = 'source-over';
+    d.clearRect(0, 0, W, H);
+    for (var r = 0; r < ROWS; r++) for (var c = 0; c < COLS; c++) {
+      d.fillStyle = st.seen[r * COLS + c] ? 'rgba(4,9,10,' + REMEMBERED_DARK + ')' : TH.black;
+      d.fillRect(c * TILE, r * TILE, TILE, TILE);
+    }
+    var flick = reducedMotion ? 1 : 1 + 0.03 * Math.sin(clockMs / 110) + 0.02 * Math.sin(clockMs / 47);
+    var cx = hp.x + TILE / 2, cy = hp.y + TILE / 2, R = TORCH_DARK * TILE * flick;
+    var grad = d.createRadialGradient(cx, cy, 0, cx, cy, R);
+    grad.addColorStop(0, 'rgba(0,0,0,1)');
+    grad.addColorStop(TORCH_CLEAR / TORCH_DARK, 'rgba(0,0,0,1)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    d.globalCompositeOperation = 'destination-out';
+    d.fillStyle = grad;
+    d.fillRect(0, 0, W, H);
+    ctx.drawImage(darkCv, 0, 0);
+
+    // Keys, doors and the trophy stay visible once seen, even out of the torchlight.
+    ctx.save();
+    ctx.globalAlpha = 0.7;
+    for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) {
+      var t = st.grid[r][c];
+      if ((t === 'K' || t === 'D' || t === 'T') && st.seen[r * COLS + c]) ctx.drawImage(img[t], c * TILE, r * TILE);
+    }
+    ctx.restore();
+  }
+
   function draw(ctx) {
     ctx.fillStyle = TH.black;
     ctx.fillRect(0, 0, COLS * TILE, ROWS * TILE);
     if (!st) return;
     for (var r = 0; r < ROWS; r++) for (var c = 0; c < COLS; c++) drawTile(c, r, st.grid[r][c], ctx);
     var hp = heroPos();
-    ctx.drawImage(img.hero, hp.x, hp.y);
+    drawHero(ctx, hp);
+    drawTorch(ctx, hp);
   }
 
   // ------------------------------------------------------------ boot
@@ -424,7 +500,7 @@
       return st && {
         room: roomIx + 1, c: st.p.c, r: st.p.r, moving: st.p.moving, facing: st.p.facing,
         keys: st.keys, moves: st.moves, ms: Math.round(st.ms), started: st.started, done: st.done,
-        doorsLeft: doorsLeft()
+        doorsLeft: doorsLeft(), seen: st.seen.filter(Boolean).length, reducedMotion: reducedMotion
       };
     }
   };
